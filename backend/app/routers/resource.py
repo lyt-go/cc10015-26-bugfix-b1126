@@ -140,6 +140,13 @@ def cross_links() -> dict[str, Any]:
     return {"links": links}
 
 
+@router.get("/sample-registry/disposal/{sample_no}")
+def disposal_outcome(sample_no: str) -> dict[str, Any]:
+    """核对同编号样品的库存处置结果：整支移交 / 分割留库 / 待核 / 是否冲突。"""
+    service = service_for("sample_registry")
+    return service.disposal_outcome(sample_no)
+
+
 @router.get("/{module}", response_model=PageResult[dict])
 def list_entries(
     module: str,

@@ -16,7 +16,7 @@ class Store:
     def __init__(self) -> None:
         self._tables: dict[str, list[dict[str, Any]]] = {}
         self._idempotent_keys: set[str] = set()
-        self._locks: dict[str, threading.Lock] = {}
+        self._locks: dict[str, threading.RLock] = {}
         self._global_lock = threading.Lock()
         # 回滚日志：{transaction_id: {module, entry_id, before_snapshot}}
         self._rollback_log: dict[str, dict] = {}
@@ -37,10 +37,11 @@ class Store:
         self._seed()
         self._locks.clear()
 
-    def _get_lock(self, key: str) -> threading.Lock:
+    def _get_lock(self, key: str) -> threading.RLock:
         with self._global_lock:
             if key not in self._locks:
-                self._locks[key] = threading.Lock()
+                # 用可重入锁：跨记录事务持锁后，内部方法还会按同一 key 再加一次锁
+                self._locks[key] = threading.RLock()
             return self._locks[key]
 
     def module_names(self) -> list[str]:
@@ -73,6 +74,28 @@ class Store:
             entry_copy = dict(entry)
             rows.append(entry_copy)
             return entry_copy
+
+    def lock_for(self, key: str) -> threading.RLock:
+        """对外暴露的业务锁，供跨记录事务按 key 加锁。"""
+        return self._get_lock(key)
+
+    def run_in_transaction(self, keys: list[str], func):
+        """按固定顺序获取多把业务锁后执行函数，避免交叉加锁死锁。
+
+        用于分割与移交这类同时处置同一母样多条库存记录的跨记录事务：
+        任何一方拿到全部锁后才能改动库位，保证同一份母样不会同时出现
+        「整支已移交」和「分割留库」两种互相矛盾的库存处置结果。
+        """
+        ordered = sorted(set(keys))
+        locks = [self._get_lock(key) for key in ordered]
+        with self._global_lock:
+            for lock in locks:
+                lock.acquire()
+        try:
+            return func()
+        finally:
+            for lock in reversed(locks):
+                lock.release()
 
     def is_idempotent(self, key: str) -> bool:
         """检查幂等键是否已存在（不写入）。"""
